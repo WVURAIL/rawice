@@ -162,9 +162,9 @@ class raw_acq:
             
         def inspect_maser(single_inp):
             tenMHz_index = int(np.round(10/(400/1024)))
-            angles = single_inp.angle_fft[:,tenMHz_index]/2/np.pi
-            angles = angles - angles[0]
-            single_inp.tau = angles/10e6 # angle/nu; tau in seconds
+            angles = single_inp.angle_fft[:,tenMHz_index]
+            angles = np.unwrap(angles - angles[0])
+            single_inp.tau = angles/10e6/2/np.pi # angle/nu; tau in seconds
             
         def plot_single_input_diagnostics(single_inp):
             single_inp.get_rms_std()
