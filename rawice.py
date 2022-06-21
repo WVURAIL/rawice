@@ -231,6 +231,11 @@ class raw_acq:
 
             
 class analyse_maser: 
+    """
+     maser analysis class
+
+    _extended_summary_
+    """
     def __init__(self, raw_acq_folder, maser_input, num_files = None):
         self.folder_path = raw_acq_folder
         self.maser_input = maser_input
