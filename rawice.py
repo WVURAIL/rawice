@@ -15,9 +15,44 @@ import sys
 
 
 def progressbar(it, prefix="", size=60, out=sys.stdout):
+    '''
+    
+    Inputs: an array (length of array = number of acq files), a string (displayed at beginning of each line,
+            a number (representing the width of the progress bar)
+    Outputs: a progress bar denoted by a certain number of '#' corresponding to the percentage of files 
+            that have been read
+            
+        This function is currently only called within the analyse_maser() class to give a visual representation
+        of how many of the given files have been analysed.
+        
+    Example input: 
+    array = [0, 1, 2]
+    progressbar(array, "Computing Delay: ", 30)
+    
+    Example output:
+    C: path\file0
+    C: path\file1
+    C: path\file2
+    Loaded raw acq HDF5 file... .............................. 0/3
+    Checking input ...
+    Loaded raw acq HDF5 file... ##########.................... 1/3
+    Checking input ...
+    Loaded raw acq HDF5 file... ####################.......... 2/3
+    Checking input ...
+    Done computing delays: ################################### 3/3
+    
+    DONE reading files and getting delays
+    
+    A possible error:
+    Getting a 'divide by zero' error within the progressbar() function when calling analyse_maser()
+        Make sure that the raw acq folder variable has a '/' at the end. 
+        raw_acq_folder = "home/users/path/acq" will yield this error
+        raw_acq_folder = "home/users/path/acq/" will not yield this error
+        
+    '''
     count = len(it)
     def show(j):
-        x = int(size*j/count)
+        x = int(size*j/count) ### dividing by 0 here
         print("{}[{}{}] {}/{}".format(prefix, u"#"*x, "."*(size-x), j, count), end='\r', file=out, flush=True)
     show(0)
     for i, item in enumerate(it):
@@ -26,20 +61,45 @@ def progressbar(it, prefix="", size=60, out=sys.stdout):
     print(f"Done {prefix}\n", flush=True, file=out)
     
 class raw_acq:
-    """
-        raw_acq diagnostics supply filename
-    """
+    '''
+    
+    Inputs: a string (path to a single acq file)
+    Outputs: "Loaded raw acq file ... "
+    
+        Assigns the information in the HDF5 acq file to the object initialized with this class. A series of functions will 
+        calculate values and assign them to this object.
+    
+    '''
     def __init__(self, raw_acq_file, diagnostics = False):
+        '''
+        
+        Inputs: a string (path to a single acq file), boolean initialized to false
+        Outputs: n/a
+        
+        The path to the raw acq file is automatically passed to this function, which will called the read() function and 
+        and the diagnostics() function if the boolean is set to true. The first argument, self, will tell all proceeding 
+        functions to save information to the object defined by the class raw_acq.
+        
+        '''
         self.file = raw_acq_file
         self.read()
         if diagnostics: 
             self.diagostics()
         
     def read(self):
+        '''
+        
+        Inputs: n/a
+        Outputs: "Loaded raw acq HDF5 file ... "
+        
+        This function is what actually reads in the acq data and saves it to the object. The following values 
+        are defined: timestream, timestamp, crate, slot, adc_input, start_time, end_time
+        
+        '''
         self.hdf5 = h5py.File(self.file,"r")
         index_map = self.hdf5['index_map']
         im_timestream = index_map['timestream'][:]
-        im_snapshot = index_map['snapshot'][:]
+        #im_snapshot = index_map['snapshot'][:]
         adc_input = np.hstack(self.hdf5['adc_input'][:])
         crate = np.hstack(self.hdf5['crate'][:])
         slot = np.hstack(self.hdf5['slot'][:])
@@ -74,6 +134,15 @@ class raw_acq:
         print("Loaded raw acq HDF5 file ... \r")
        
     def diagostics(self):
+        '''
+        
+        Input: n/a
+        Output: A list of information about the acq data acquisition as well as a graph that displays the time between
+        adc captures. 
+        
+        You can call this by either calling the object.diagnostics(), or by setting the last argument of raw_acq() to true. 
+        
+        '''
         print("raw ACQ diagnostics ... \n")
         print(f"archive_version: {self.hdf5.attrs['archive_version'].decode()}")
         print(f"collection_server: {self.hdf5.attrs['collection_server'].decode()}")
@@ -99,10 +168,26 @@ class raw_acq:
         
         
     class check_input:
-        """
-            diagnostics for a single icebaord input given input_to_check = [int, int, int] # crate_number, slot_number,input_number)
-        """
+        '''
+        
+            Input: a single array corresponding to the input on the ICE board [crate number, slot number, input number]
+                Note: input number should be between 0 and 15 (A1 and B8)
+            Output: "Checking input [crate number, slot number, input number]..."
+            
+            This is a sub-class, so the raw_acq object must already exist in order to define this one. It will define a new object
+            that holds information for a single input. 
+            
+        '''
         def __init__(single_inp, input_to_check):
+            '''
+            
+            Input: a single array corresponding to the input on the ICE board [crate number, slot number, input number]
+            Output: n/a
+            
+            Initializes the object and calls a series of functions to calculate and save values. This runs automatically when you run 
+            check_input()
+            
+            '''
             print(f"Checking input {input_to_check} ... \r")
             single_inp.input_to_check = input_to_check
             single_inp.get_timestream_for_input()
@@ -111,6 +196,18 @@ class raw_acq:
             single_inp.get_fgpa_count_for_input()
         
         def get_timestream_for_input(single_inp):
+            '''
+            
+            Input: an array (passed from init())
+            Outputs: n/a
+            
+            Defines the value 'input id' which holds the information for the crate and slot number of the ICE Board as well as the
+            input number. Also save the values of time_stamps, which hold the times for each snapshot. Lastly, defines the time streams 
+            which are quantized sine waves for the input. 
+            
+            This function is automatically called when the check_input() object gets initialized.
+            
+            '''
             itc = single_inp.input_to_check
             input_number = itc[2]
             crate_number = itc[1]
@@ -138,6 +235,17 @@ class raw_acq:
             single_inp.input_id = input_id
     
         def get_rms_std(single_inp):
+            '''
+            
+            Input: an array (passed from init())
+            Outputs: n/a
+            
+            This function defines the following values: standard deviation of the acd data and the root-mean-square
+            of the acd data. 
+            
+            This function is automatically called when the check_input() object gets initialized.
+            
+            '''
             istream = single_inp.time_streams
             adc_std = np.std(istream, axis=1)
             adc_rms =  np.sqrt(np.mean(np.square(istream), axis = 1))
@@ -145,28 +253,74 @@ class raw_acq:
             single_inp.adc_rms = adc_rms
 
         def get_fft_of_adc_counts(single_inp):
+            '''
+            
+            Input: an array (passed from init())
+            Outputs: n/a
+            
+            This function defines the following values: the fast Fourier Transform of the time stream data (quantized sine waves) which 
+            which converts the data from position space to frequency space, the magnitude of the fast Fourier Transform, and the angles 
+            associated with the fast Fourier Transform in units of radians.
+            
+            This function is automatically called when the check_input() object gets initialized.
+            
+            '''
             istream = single_inp.time_streams
             window = get_window('blackmanharris',2048)
             ffted_data = np.fft.fft(istream*window, axis=1)
             single_inp.fft = ffted_data[:,:ffted_data.shape[1] // 2]
             single_inp.mag_fft = np.abs(ffted_data)[:,:ffted_data.shape[1] // 2]
-            single_inp.angle_fft = np.angle(ffted_data)[:,:ffted_data.shape[1] // 2]
+            single_inp.angle_fft = np.angle((ffted_data)[:,:1024])
             
         
         def get_single_input_rms(single_inp):
+            '''
+            
+            Input: an array (passed from init())
+            Outputs: n/a
+            
+            This function is automatically called when the check_input() object gets initialized.            
+            
+            '''
             istream = single_inp.time_streams
             single_inp.rms = np.sqrt(np.mean(np.square(istream), axis = 1))
 
         def get_fgpa_count_for_input(single_inp):
+            '''
+            
+            Input: an array (passed from init())
+            Outputs: n/a
+            
+            This function isolates the time at each fpga snapshot and saves it to its own list.
+            
+            This function is automatically called when the check_input() object gets initialized.           
+            
+            '''
             single_inp.time_fpga_count = single_inp.time_stamps["fpga_count"]
             
         def inspect_maser(single_inp):
+            '''
+            
+            Input: an array (representing the input to check)
+            Outputs: n/a
+            
+            This function first determines the index corresponding to 10 MHz, which is related to the 10 MHz clocks.
+            Then, it defines the angles for each of those 10 MHz indeces accross all snapshots and calculates the 
+            tau values for those angles. 
+            
+            '''
             tenMHz_index = int(np.round(10/(400/1024)))
-            angles = single_inp.angle_fft[:,tenMHz_index]/2/np.pi
-            angles = angles - angles[0]
-            single_inp.tau = angles/10e6 # angle/nu; tau in seconds
+            angles = single_inp.angle_fft[:,tenMHz_index]
+            single_inp.angles = angles
+            angles = np.unwrap(angles - angles[0])
+            single_inp.tau = angles/2/np.pi/10e6 # angle/nu; tau in seconds
             
         def plot_single_input_diagnostics(single_inp):
+            '''
+            
+            
+            
+            '''
             single_inp.get_rms_std()
             single_inp.get_fft_of_adc_counts()
             #########################################################################################################
@@ -198,6 +352,11 @@ class raw_acq:
             Check adc rms of all inputs of an iceboard of a given crate and slot from a singel raw_acq file
         """
         def __init__(iceboard, crate, slot): #, time_slice):
+            '''
+            
+            
+            
+            '''
             #iceboard.time_slice = time_slice
             iceboard.crate = crate
             iceboard.slot = slot
@@ -231,7 +390,17 @@ class raw_acq:
 
             
 class analyse_maser: 
+    '''
+    
+    
+    
+    '''
     def __init__(self, raw_acq_folder, maser_input, num_files = None):
+        '''
+        
+        
+        
+        '''
         self.folder_path = raw_acq_folder
         self.maser_input = maser_input
         self.num_files = num_files
@@ -241,13 +410,20 @@ class analyse_maser:
         #self.get_allan_deviation()
     
     def read(self):
+        '''
+        
+        
+        
+        '''
         files = glob.glob(self.folder_path + "*[!.lock]")
         files.sort()
         files = files[:self.num_files]
         print(*files, sep = "\n")
         taus = []
         delays = []
-        num_files = len(files)
+        angles = []
+        num_files = len(files) ### this is zero
+        #calling progressbar with it=0 so that when we initialize count = 0, we divide by 0 (in x)
         input_to_check = self.maser_input            
         for i in progressbar(range(num_files), "Computing Delay: ", 80):
             file_name = files[i]
@@ -259,10 +435,22 @@ class analyse_maser:
             maser.inspect_maser()
             taus.append(maser.time_fpga_count)
             delays.append(maser.tau)
+            angles.append(maser.angles)
+            
         self.fpgatime = np.concatenate(taus, axis = 0)
+        self.angles = np.concatenate(angles, axis = 0)
         self.delays = np.concatenate(delays, axis = 0)
+        self.angles = np.unwrap(self.angles)
+        self.taus = self.angles/2/np.pi/10e6
+       
+      
     
     def plot_delays(self):
+        '''
+        
+        
+        
+        '''
         weeks = self.fpgatime*2.56e-6/60/60/24/7
         timesaxis = weeks
         time_axis = "Weeks"
@@ -278,14 +466,19 @@ class analyse_maser:
                     seconds = self.fpgatime*2.56e-6
                     timeaxis = seconds
                     time_axis = "seconds"
-        plt.figure(figsize=(6.5,2))
-        plt.scatter(timesaxis,self.delays/1e-9, s= 0.1, c = 'k', marker = '.')
+        plt.figure(figsize=(13,4))
+        plt.scatter(timesaxis,(self.taus/1e-9), s= 0.1, c = 'k', marker = '.')
         plt.xlabel(time_axis)
         plt.ylabel(r" $\Delta(\tau)$ (ns)")
-        plt.savefig("figure/gpsvmaser.pdf",dpi = 300, format = "pdf", bbox_inches='tight')
+        #plt.savefig("figure/gpsvmaser.pdf",dpi = 300, format = "pdf", bbox_inches='tight')
         self.plt = plt
         
     def get_allan_deviation(self):
+        '''
+        
+        
+        
+        '''
         taus_from_fpga_counts = self.fpgatime*2.56e-6
         (taus, adevs, errors, ns) = allan.oadev(self.delays, taus = taus_from_fpga_counts)
         self.adevs = adevs
@@ -295,16 +488,26 @@ class analyse_maser:
         plt.ylabel("Allan Deviation")
         plt.xlabel("Time (s)")
         plt.grid()
-        plt.savefig("figure/adev.pdf",dpi = 300, format = "pdf", bbox_inches='tight')
+        #plt.savefig("figure/adev.pdf",dpi = 300, format = "pdf", bbox_inches='tight')
         self.plt = plt
     
         
 def get_newest_file(folder_path):
+    '''
+    
+    
+    
+    '''
     files = glob.glob(folder_path + "*[!.lock]")
     newest_file = max(files, key=os.path.getctime)
     return newest_file
 
 def get_second_newest_file(folder_path):
+    '''
+    
+    
+    
+    '''
     files = glob.glob(folder_path + "*[!.lock]")
     newest_file = max(files, key=os.path.getctime)
     files.remove(newest_file)
