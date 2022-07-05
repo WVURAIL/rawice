@@ -390,11 +390,6 @@ class raw_acq:
 
             
 class analyse_maser: 
-    '''
-    
-    
-    
-    '''
     def __init__(self, raw_acq_folder, maser_input, num_files = None):
         '''
         
