@@ -483,8 +483,11 @@ class analyse_maser:
         (taus, adevs, errors, ns) = allan.oadev(self.taus, taus = taus_from_fpga_counts)
         self.adevs = adevs
         self.adev_taus = taus
+        adev_exp = [(1/x)*(2*1e-10)*((3/2)**(1/2)) for x in taus]
         plt.figure(figsize=(6.5,5))
         plt.loglog(taus,adevs, c = 'k', lw = 1)
+        plt.loglog(taus, adev_exp, marker = ',', c = 'green')
+        plt.loglog()
         plt.ylabel("Allan Deviation")
         plt.xlabel("Time (s)")
         plt.grid()
