@@ -12,6 +12,7 @@ import os.path
 from scipy.signal import get_window
 import allantools as allan 
 import sys
+from scipy.optimize import curve_fit
 
 
 def progressbar(it, prefix="", size=60, out=sys.stdout):
@@ -59,6 +60,17 @@ def progressbar(it, prefix="", size=60, out=sys.stdout):
         yield item
         show(i+1)
     print(f"Done {prefix}\n", flush=True, file=out)
+    
+def objective(x, amp, stability, phase, vertical):
+    '''
+    Fits the quantized sine wave with a fit and error from parameters
+        x : list from 1 to 2048
+        amp: amplitude of curve fit in units of voltage
+        stability: error on the 10 MHz clock, unitless
+        phase: phase shift in units of radians
+        vertical: vertical shift of curve in units of voltage
+    '''
+    return np.abs(amp) * np.cos((2*np.pi*(10*stability/800))*x + phase) + vertical
     
 class raw_acq:
     '''
@@ -315,6 +327,8 @@ class raw_acq:
             angles = np.unwrap(angles - angles[0])
             single_inp.tau = angles/2/np.pi/10e6 # angle/nu; tau in seconds
             
+            
+            
         def plot_single_input_diagnostics(single_inp):
             '''
             
@@ -346,6 +360,102 @@ class raw_acq:
                 extent=[800, 400, single_inp.time_stamps['fpga_count'][-1], single_inp.time_stamps['fpga_count'][0]]
             )
             fig.show()
+        
+        def get_curve_fit(single_input):
+            xlist = [val for val in range(0+1, 2049)]
+            #xlist = [(float(val)*(1.25e-9)) for val in x]
+            amp = []
+            amp_error = []
+            freq_stability = []
+            freq_err = []
+            phase = [] 
+            phase_err = []
+            vertical = []
+            vertical_error = []
+            
+            for i in range(2048):
+                #get each timestream for fitting
+                ylist = single_input.time_streams[i]
+                xlist = [val for val in range(0+1, len(xlist)+1)]
+                yerror = np.ones(len(xlist)) * 1/np.sqrt(12)
+
+                #fit the sine wave
+                #print(i)
+                popt, cov = curve_fit(objective, xlist, ylist, sigma=yerror, p0=[2, 1.0, 1.25*np.pi, 1], 
+                                      bounds=([-127, 0, 0, -128],[127, 2, 4*np.pi, 127]))
+                err = np.sqrt(np.diag(cov))
+                
+                #save values to list for each of the 2048 snapshots
+                amp.append(np.abs(popt[0]))
+                amp_error.append(err[0])
+                
+                freq_stability.append(popt[1])
+                freq_err.append(err[1])
+                
+                phase.append(popt[2])   #in seconds
+                #phase_err is actually error in tau, which is what we care about
+                #calculated by propogation of error
+                phase_err.append((popt[2]/(2*np.pi*(10*popt[1]/800)))*(np.sqrt((err[2]/popt[2])**2 + (err[1]/popt[1])**2))) 
+                
+                vertical.append(popt[3])
+                vertical_error.append(err[3])
+                #popt[2]/2/np.pi/(popt[1]*10e6)/(10e-9)
+                
+            
+            single_input.amp = amp
+            single_input.amp_err = amp_error
+            single_input.phase = phase
+            single_input.phase_err = phase_err
+            single_input.freq_stability = freq_stability
+            single_input.freq_err = freq_err
+            single_input.vert = vertical
+            single_input.vert_err = vertical_error
+            
+            single_input.phase_unwrapped = np.unwrap(phase)
+            single_input.tau_shift = [(val/2/np.pi/(popt[1]*10e6)/(1.25e-9)) for val in single_input.phase_unwrapped]
+
+
+        def get_single_curve_fit(single_input, i):
+            #make a function that just does the curve fit and saves it to the object single_input
+
+            #get the timestream plot ready
+            ylist = single_input.time_streams[i]
+            xlist = [val for val in range(0+1, len(ylist)+1)]
+            yerror = np.ones(len(xlist)) * 1/np.sqrt(12)
+            
+
+            xline = np.arange(min(xlist), max(xlist), 1)
+            yline = objective(xline, single_input.amp[i], single_input.freq_stability[i], single_input.phase[i], single_input.vert[i])
+            
+            #plot timestream with curve fit overlayed
+            fig, ax = plt.subplots(figsize=(20, 10))
+            plt.plot(xlist, ylist)
+            plt.plot(xline, yline)
+            plt.title('Single input curve fit')
+            #plt.legend()
+            
+            #save b parameter and d
+            #get avg of d, then do curve fit again with a set d value
+            #save error to plot the b val with error bars  
+            
+            fig, ax = plt.subplots(figsize=(20,10))
+            #ax.plot(xlist, tau_shift, '.')
+            ax.errorbar(xlist, single_input.tau_shift, yerr=single_input.phase_err, fmt=',', ecolor='orange')
+            ax.set_title('Tau shift')
+            ax.set_ylabel('$\Delta$ $\tau$ (ns)')
+            
+            fig, ax1 = plt.subplots(figsize=(20,10))
+            #ax1.errorbar(xlist, single_input.freq_stability, yerr=single_input.freq_err, fmt='.', ecolor='orange')
+            ax1.plot(xlist, single_input.freq_stability, '.')
+            ax1.set_title('Frequency Stability')
+            
+            fig, ax2 = plt.subplots(figsize=(20,10))
+            #ax2.errorbar(xlist, single_input.amp, yerr=single_input.amp_err, fmt='.', ecolor='orange')
+            ax2.plot(xlist, single_input.amp, '.')
+            ax2.set_title('Amplitude')
+            
+                
+            
     
     class check_iceboard:
         """
@@ -516,3 +626,4 @@ def get_second_newest_file(folder_path):
     files.remove(newest_file)
     newest_file = max(files, key=os.path.getctime)
     return newest_file
+
