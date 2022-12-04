@@ -69,8 +69,10 @@ def objective(x, amp, stability, phase, vertical):
         stability: error on the 10 MHz clock, unitless
         phase: phase shift in units of radians
         vertical: vertical shift of curve in units of voltage
+        
+        x/800MHz converts from integer steps from 1 to 2048 into units of time (1.25 ns)
     '''
-    return np.abs(amp) * np.cos((2*np.pi*(10*stability/800))*x + phase) + vertical
+    return np.abs(amp) * np.cos(2*np.pi*10*stability*x/800 + phase) + vertical
     
 class raw_acq:
     '''
@@ -369,9 +371,12 @@ class raw_acq:
             freq_stability = []
             freq_err = []
             phase = [] 
-            phase_err = []
+            tau_err = []
             vertical = []
             vertical_error = []
+            phase_err = []
+            
+            #change the names so they make sense phase_err -> tau_err
             
             for i in range(2048):
                 #get each timestream for fitting
@@ -385,6 +390,13 @@ class raw_acq:
                                       bounds=([-127, 0, 0, -128],[127, 2, 4*np.pi, 127]))
                 err = np.sqrt(np.diag(cov))
                 
+                #check the error
+                #if the phase error is huge , rerun the curvefit again with different p0 value for phase
+                if err[2] > 100:
+                    popt, cov = curve_fit(objective, xlist, ylist, sigma=yerror, p0=[2, 1.0, .5*np.pi, 1], 
+                                      bounds=([-127, 0, 0, -128],[127, 2, 4*np.pi, 127]))
+                    err = np.sqrt(np.diag(cov))
+                
                 #save values to list for each of the 2048 snapshots
                 amp.append(np.abs(popt[0]))
                 amp_error.append(err[0])
@@ -393,26 +405,35 @@ class raw_acq:
                 freq_err.append(err[1])
                 
                 phase.append(popt[2])   #in seconds
-                #phase_err is actually error in tau, which is what we care about
+                phase_err.append(err[2])
+                
                 #calculated by propogation of error
-                phase_err.append((popt[2]/(2*np.pi*(10*popt[1]/800)))*(np.sqrt((err[2]/popt[2])**2 + (err[1]/popt[1])**2))) 
+                tau_err.append((popt[2]/(2*np.pi*(10*popt[1]/800)))*(np.sqrt((err[2]/popt[2])**2 + (err[1]/popt[1])**2))) 
                 
                 vertical.append(popt[3])
                 vertical_error.append(err[3])
                 #popt[2]/2/np.pi/(popt[1]*10e6)/(10e-9)
                 
+
+                
+                
             
             single_input.amp = amp
             single_input.amp_err = amp_error
             single_input.phase = phase
-            single_input.phase_err = phase_err
+            single_input.tau_err = tau_err
             single_input.freq_stability = freq_stability
             single_input.freq_err = freq_err
             single_input.vert = vertical
             single_input.vert_err = vertical_error
+            single_input.phase_err = phase_err   #change!
             
-            single_input.phase_unwrapped = np.unwrap(phase)
-            single_input.tau_shift = [(val/2/np.pi/(popt[1]*10e6)/(1.25e-9)) for val in single_input.phase_unwrapped]
+            single_input.phase_unwrapped = np.unwrap(phase - phase[0])
+            single_input.tau_shift = [(val/2/np.pi/(popt[1]*10e6)/1e-9) for val in single_input.phase_unwrapped]
+            for val in range(2048):
+                if single_input.phase_err[val] > 1e7:
+                    print(val)
+            #why 10e6 and 1.25e-9
 
 
         def get_single_curve_fit(single_input, i):
@@ -422,6 +443,8 @@ class raw_acq:
             ylist = single_input.time_streams[i]
             xlist = [val for val in range(0+1, len(ylist)+1)]
             yerror = np.ones(len(xlist)) * 1/np.sqrt(12)
+            
+            #print(single_input.phase_err[i])
             
 
             xline = np.arange(min(xlist), max(xlist), 1)
@@ -440,7 +463,7 @@ class raw_acq:
             
             fig, ax = plt.subplots(figsize=(20,10))
             #ax.plot(xlist, tau_shift, '.')
-            ax.errorbar(xlist, single_input.tau_shift, yerr=single_input.phase_err, fmt=',', ecolor='orange')
+            ax.errorbar(xlist, single_input.tau_shift, yerr=single_input.tau_err, fmt=',', ecolor='orange')
             ax.set_title('Tau shift')
             ax.set_ylabel('$\Delta$ $\tau$ (ns)')
             
@@ -551,7 +574,7 @@ class analyse_maser:
         self.angles = np.concatenate(angles, axis = 0)
         self.delays = np.concatenate(delays, axis = 0)
         self.angles = np.unwrap(self.angles)
-        self.taus = self.angles/2/np.pi/10e6
+        self.taus = self.angles/2/np.pi/10e6/1e-9
        
       
     
@@ -577,7 +600,7 @@ class analyse_maser:
                     timesaxis = seconds
                     time_axis = "seconds"
         plt.figure(figsize=(13,4))
-        plt.scatter(timesaxis,(self.taus/1e-9), s= 0.1, c = 'k', marker = '.')
+        plt.scatter(timesaxis,(self.taus), s= 0.1, c = 'k', marker = '.')  #come back to for 1e-9
         plt.xlabel(time_axis)
         plt.ylabel(r" $\Delta(\tau)$ (ns)")
         #plt.savefig("figure/gpsvmaser.pdf",dpi = 300, format = "pdf", bbox_inches='tight')
