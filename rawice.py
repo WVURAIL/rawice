@@ -10,7 +10,6 @@ import datetime
 import glob
 import os.path
 from scipy.signal import get_window
-import allantools as allan 
 import sys
 from scipy.optimize import curve_fit
 
@@ -610,8 +609,10 @@ class analyse_maser:
         '''
         
         
+
         
         '''
+        import allantools as allan 
         taus_from_fpga_counts = self.fpgatime*2.56e-6 #time of every fpga caputure in seconds
         (taus, adevs, errors, ns) = allan.oadev(self.taus, taus = taus_from_fpga_counts)
         self.adevs = adevs
