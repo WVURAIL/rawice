@@ -7,3 +7,6 @@ venv/
 *.dat
 *.raw
 *.h5
+
+# Jupyter
+.ipynb_checkpoints/
