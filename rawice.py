@@ -11,7 +11,32 @@ import glob
 import os.path
 from scipy.signal import get_window
 import sys
+import warnings
 from scipy.optimize import curve_fit
+
+
+class _LegacyAnalysisFactory:
+    """Bind nested analysis helpers to an acquisition instance.
+
+    Access through an instance (``acq.check_input(...)``) uses that instance.
+    Access through the class (``raw_acq.check_input(...)``), which is used by
+    older notebooks, uses the most recently loaded acquisition.
+    """
+
+    def __init__(self, analysis_class_name):
+        self.analysis_class_name = analysis_class_name
+
+    def __get__(self, instance, owner):
+        def create_analysis(*args, **kwargs):
+            acquisition = instance if instance is not None else owner._latest_instance
+            if acquisition is None:
+                raise RuntimeError(
+                    "Load a raw_acq file before creating an analysis helper."
+                )
+            analysis_class = getattr(owner, self.analysis_class_name)
+            return analysis_class(acquisition, *args, **kwargs)
+
+        return create_analysis
 
 
 def progressbar(it, prefix="", size=60, out=sys.stdout):
@@ -43,16 +68,16 @@ def progressbar(it, prefix="", size=60, out=sys.stdout):
     
     DONE reading files and getting delays
     
-    A possible error:
-    Getting a 'divide by zero' error within the progressbar() function when calling analyse_maser()
-        Make sure that the raw acq folder variable has a '/' at the end. 
-        raw_acq_folder = "home/users/path/acq" will yield this error
-        raw_acq_folder = "home/users/path/acq/" will not yield this error
+    Empty iterables complete without attempting to divide by zero.
         
     '''
     count = len(it)
+    if count == 0:
+        print(f"Done {prefix}\n", flush=True, file=out)
+        return
+
     def show(j):
-        x = int(size*j/count) ### dividing by 0 here
+        x = int(size*j/count)
         print("{}[{}{}] {}/{}".format(prefix, u"#"*x, "."*(size-x), j, count), end='\r', file=out, flush=True)
     show(0)
     for i, item in enumerate(it):
@@ -83,6 +108,17 @@ class raw_acq:
         calculate values and assign them to this object.
     
     '''
+    _latest_instance = None
+    _legacy_state_fields = (
+        "timestream",
+        "timestamp",
+        "crate",
+        "slot",
+        "adc_input",
+        "start_time",
+        "end_time",
+    )
+
     def __init__(self, raw_acq_file, diagnostics = False):
         '''
         
@@ -113,22 +149,42 @@ class raw_acq:
         index_map = self.hdf5['index_map']
         im_timestream = index_map['timestream'][:]
         #im_snapshot = index_map['snapshot'][:]
-        adc_input = np.hstack(self.hdf5['adc_input'][:])
-        crate = np.hstack(self.hdf5['crate'][:])
-        slot = np.hstack(self.hdf5['slot'][:])
-        timestamp = np.hstack(self.hdf5['timestamp'][:])
+        adc_input_data = self.hdf5['adc_input'][:]
+        crate_data = self.hdf5['crate'][:]
+        slot_data = self.hdf5['slot'][:]
+        timestamp_data = self.hdf5['timestamp'][:]
         timestream = self.hdf5['timestream'][:]
+        if any(
+            array.size == 0
+            for array in (adc_input_data, crate_data, slot_data, timestamp_data, timestream)
+        ):
+            self.hdf5.close()
+            raise ValueError(
+                f"Acquisition file {os.fspath(self.file)!r} contains no frames."
+            )
+        adc_input = np.hstack(adc_input_data)
+        crate = np.hstack(crate_data)
+        slot = np.hstack(slot_data)
+        timestamp = np.hstack(timestamp_data)
         adc_stream_len = timestream.shape[-1]
 
         fpga_counts = np.hstack(timestamp['fpga_count'])
         ctime = np.hstack(timestamp['ctime'])
-        start_time = datetime.datetime.fromtimestamp(ctime[0]).isoformat()
-        end_time = datetime.datetime.fromtimestamp(ctime[-1]).isoformat()
+        start_time = datetime.datetime.fromtimestamp(
+            ctime[0], tz=datetime.timezone.utc
+        ).isoformat()
+        end_time = datetime.datetime.fromtimestamp(
+            ctime[-1], tz=datetime.timezone.utc
+        ).isoformat()
 
-        adc_record_fpga_count_index = np.where(np.roll(fpga_counts,1)!=fpga_counts)[0]
-        adc_record_ctime_index = np.where(np.roll(ctime,1)!=ctime)[0]
+        adc_record_fpga_count_index = np.flatnonzero(
+            np.r_[True, fpga_counts[1:] != fpga_counts[:-1]]
+        )
+        adc_record_ctime_index = np.flatnonzero(
+            np.r_[True, ctime[1:] != ctime[:-1]]
+        )
         adc_record_fpga_count = fpga_counts[adc_record_fpga_count_index]
-        adc_record_ctime = fpga_counts[adc_record_ctime_index]
+        adc_record_ctime = ctime[adc_record_ctime_index]
         self.fpga_counts_between_raw_adc_capture = np.diff(adc_record_fpga_count)
         self.time_between_adc_capture = np.unique(self.fpga_counts_between_raw_adc_capture*2.56e-6)
         
@@ -136,15 +192,36 @@ class raw_acq:
         self.num_inputs = np.max(adc_input) + 1
         self.num_crates = np.max(crate) + 1
         self.num_slots = np.max(slot) + 1
-        self.num_timestamps = adc_record_fpga_count.shape[0] + 1
-        raw_acq.timestream = timestream.astype(int)
-        raw_acq.timestamp = timestamp
-        raw_acq.crate = crate
-        raw_acq.slot = slot
-        raw_acq.adc_input = adc_input
-        raw_acq.start_time = start_time
-        raw_acq.end_time = end_time
+        self.num_timestamps = adc_record_fpga_count.shape[0]
+        self.timestream = timestream.astype(int)
+        self.timestamp = timestamp
+        self.crate = crate
+        self.slot = slot
+        self.adc_input = adc_input
+        self.start_time = start_time
+        self.end_time = end_time
+        self.adc_record_ctime = adc_record_ctime
+        self._publish_legacy_class_state()
         print("Loaded raw acq HDF5 file ... \r")
+
+    def _publish_legacy_class_state(self):
+        """Keep historical class-level access pointed at the newest file.
+
+        New code should read data from the acquisition instance. The aliases
+        remain for notebooks that call ``raw_acq(file)`` and then inspect
+        ``raw_acq.timestream`` or call ``raw_acq.check_input(...)``.
+        """
+        acquisition_class = type(self)
+        acquisition_class._latest_instance = self
+        for field in self._legacy_state_fields:
+            setattr(acquisition_class, field, getattr(self, field))
+
+    def _input_mask(self, crate_number, slot_number, input_number):
+        return (
+            (self.crate == crate_number)
+            & (self.slot == slot_number)
+            & (self.adc_input == input_number)
+        )
        
     def diagostics(self):
         '''
@@ -167,8 +244,8 @@ class raw_acq:
         print(f"Timestamping_warning: {self.hdf5.attrs['timestamping_warning'].decode()}")
         print()
 
-        print(f"ctime Timestamp of first raw_adc frame: {raw_acq.start_time}")
-        print(f"ctime Timestamp of last raw_adc frame: {raw_acq.end_time}")
+        print(f"ctime Timestamp of first raw_adc frame: {self.start_time}")
+        print(f"ctime Timestamp of last raw_adc frame: {self.end_time}")
         print()
         
         plt.figure(figsize=(15,3))
@@ -180,7 +257,7 @@ class raw_acq:
         plt.title("Time since last adc capture")
         
         
-    class check_input:
+    class _CheckInput:
         '''
         
             Input: a single array corresponding to the input on the ICE board [crate number, slot number, input number]
@@ -191,7 +268,7 @@ class raw_acq:
             that holds information for a single input. 
             
         '''
-        def __init__(single_inp, input_to_check):
+        def __init__(single_inp, acquisition, input_to_check):
             '''
             
             Input: a single array corresponding to the input on the ICE board [crate number, slot number, input number]
@@ -202,6 +279,7 @@ class raw_acq:
             
             '''
             print(f"Checking input {input_to_check} ... \r")
+            single_inp.acquisition = acquisition
             single_inp.input_to_check = input_to_check
             single_inp.get_timestream_for_input()
             single_inp.get_single_input_rms()
@@ -222,25 +300,27 @@ class raw_acq:
             
             '''
             itc = single_inp.input_to_check
+            if len(itc) != 3:
+                raise ValueError("input_to_check must be [crate, slot, input].")
+
+            crate_number = itc[0]
+            slot_number = itc[1]
             input_number = itc[2]
-            crate_number = itc[1]
-            slot_number = itc[0]
-            
-            single_inp.time_stamps = raw_acq.timestamp[np.intersect1d(
-                np.where(
-                    raw_acq.adc_input == input_number),
-                np.where(
-                    raw_acq.crate == crate_number),
-                np.where(
-                    raw_acq.slot == slot_number)
-            )]
-            single_inp.time_streams = raw_acq.timestream[np.intersect1d(
-                np.where(
-                    raw_acq.adc_input == input_number),
-                np.where(
-                    raw_acq.crate == crate_number),
-                np.where(
-                    raw_acq.slot == slot_number))]
+
+            acquisition = single_inp.acquisition
+            input_mask = acquisition._input_mask(
+                crate_number,
+                slot_number,
+                input_number,
+            )
+            if not np.any(input_mask):
+                raise ValueError(
+                    "No acquisition data found for "
+                    f"[crate={crate_number}, slot={slot_number}, input={input_number}]."
+                )
+
+            single_inp.time_stamps = acquisition.timestamp[input_mask]
+            single_inp.time_streams = acquisition.timestream[input_mask]
             input_id = {}
             input_id["crate"] = crate_number 
             input_id["slot"] = slot_number
@@ -363,8 +443,6 @@ class raw_acq:
             fig.show()
         
         def get_curve_fit(single_input):
-            xlist = [val for val in range(0+1, 2049)]
-            #xlist = [(float(val)*(1.25e-9)) for val in x]
             amp = []
             amp_error = []
             freq_stability = []
@@ -377,10 +455,11 @@ class raw_acq:
             
             #change the names so they make sense phase_err -> tau_err
             
-            for i in range(2048):
+            num_frames = single_input.time_streams.shape[0]
+            for i in range(num_frames):
                 #get each timestream for fitting
                 ylist = single_input.time_streams[i]
-                xlist = [val for val in range(0+1, len(xlist)+1)]
+                xlist = np.arange(1, len(ylist) + 1)
                 yerror = np.ones(len(xlist)) * 1/np.sqrt(12)
 
                 #fit the sine wave
@@ -427,9 +506,13 @@ class raw_acq:
             single_input.vert_err = vertical_error
             single_input.phase_err = phase_err   #change!
             
-            single_input.phase_unwrapped = np.unwrap(phase - phase[0])
+            phase_array = np.asarray(phase)
+            single_input.phase_unwrapped = np.unwrap(phase_array - phase_array[0])
+            # Preserve the historical calculation, which uses the stability
+            # from the final fit for every phase sample. Its scientific
+            # interpretation needs validation before changing that behavior.
             single_input.tau_shift = [(val/2/np.pi/(popt[1]*10e6)/1e-9) for val in single_input.phase_unwrapped]
-            for val in range(2048):
+            for val in range(num_frames):
                 if single_input.phase_err[val] > 1e7:
                     print(val)
             #why 10e6 and 1.25e-9
@@ -440,7 +523,7 @@ class raw_acq:
 
             #get the timestream plot ready
             ylist = single_input.time_streams[i]
-            xlist = [val for val in range(0+1, len(ylist)+1)]
+            xlist = np.arange(1, len(ylist) + 1)
             yerror = np.ones(len(xlist)) * 1/np.sqrt(12)
             
             #print(single_input.phase_err[i])
@@ -460,36 +543,38 @@ class raw_acq:
             #get avg of d, then do curve fit again with a set d value
             #save error to plot the b val with error bars  
             
+            fit_indices = np.arange(len(single_input.tau_shift))
             fig, ax = plt.subplots(figsize=(20,10))
             #ax.plot(xlist, tau_shift, '.')
-            ax.errorbar(xlist, single_input.tau_shift, yerr=single_input.tau_err, fmt=',', ecolor='orange')
+            ax.errorbar(fit_indices, single_input.tau_shift, yerr=single_input.tau_err, fmt=',', ecolor='orange')
             ax.set_title('Tau shift')
-            ax.set_ylabel('$\Delta$ $\tau$ (ns)')
+            ax.set_ylabel(r'$\Delta$ $\tau$ (ns)')
             
             fig, ax1 = plt.subplots(figsize=(20,10))
             #ax1.errorbar(xlist, single_input.freq_stability, yerr=single_input.freq_err, fmt='.', ecolor='orange')
-            ax1.plot(xlist, single_input.freq_stability, '.')
+            ax1.plot(fit_indices, single_input.freq_stability, '.')
             ax1.set_title('Frequency Stability')
             
             fig, ax2 = plt.subplots(figsize=(20,10))
             #ax2.errorbar(xlist, single_input.amp, yerr=single_input.amp_err, fmt='.', ecolor='orange')
-            ax2.plot(xlist, single_input.amp, '.')
+            ax2.plot(fit_indices, single_input.amp, '.')
             ax2.set_title('Amplitude')
             
                 
             
     
-    class check_iceboard:
+    class _CheckIceboard:
         """
             Check adc rms of all inputs of an iceboard of a given crate and slot from a singel raw_acq file
         """
-        def __init__(iceboard, crate, slot): #, time_slice):
+        def __init__(iceboard, acquisition, crate, slot): #, time_slice):
             '''
             
             
             
             '''
             #iceboard.time_slice = time_slice
+            iceboard.acquisition = acquisition
             iceboard.crate = crate
             iceboard.slot = slot
             iceboard.full_acq_capture_diagnostic()
@@ -503,13 +588,17 @@ class raw_acq:
             ant_std = np.zeros(16)
             ant_rms = np.zeros(16)
             plt.figure(figsize=(15,8))
-            plt.suptitle(f"total adc_rms of (crate,slot){iceboard.crate}{iceboard.slot} between {raw_acq.start_time} and {raw_acq.end_time}")
+            acquisition = iceboard.acquisition
+            plt.suptitle(f"total adc_rms of (crate,slot){iceboard.crate}{iceboard.slot} between {acquisition.start_time} and {acquisition.end_time}")
             #print("\n\n")
             #print("(crate,slot,input),rms,log2std")
             for i in range(16):
-                inp0 = np.where(raw_acq.adc_input[:] == i)[0]
-                ant0_data = raw_acq.timestream[:][inp0]
-                ant0_data = ant0_data[:]
+                input_mask = acquisition._input_mask(
+                    iceboard.crate,
+                    iceboard.slot,
+                    i,
+                )
+                ant0_data = acquisition.timestream[input_mask]
                 #ant_rms[i] = np.sqrt(np.mean(ant0_data)**2)
                 #ant_std[i] =  np.log2(np.std(ant0_data))
                 #print(f"({check_crate},{check_slot},{i}),{ant_rms[i]:1.3f},{ant_std[i]:1.3f}")
@@ -519,6 +608,9 @@ class raw_acq:
                 plt.title(f'input: {i}')
                 plt.tight_layout()
             plt.show()
+
+    check_input = _LegacyAnalysisFactory("_CheckInput")
+    check_iceboard = _LegacyAnalysisFactory("_CheckIceboard")
 
             
 class analyse_maser: 
@@ -547,27 +639,37 @@ class analyse_maser:
         
         
         '''
-        files = glob.glob(self.folder_path + "*[!.lock]")
-        files.sort()
-        files = files[:self.num_files]
+        files = _list_acquisition_files(self.folder_path)
+        if self.num_files is not None:
+            files = files[:self.num_files]
+        if not files:
+            raise FileNotFoundError(
+                f"No acquisition files found in {os.path.abspath(self.folder_path)!r}."
+            )
+
         print(*files, sep = "\n")
         taus = []
         delays = []
         angles = []
-        num_files = len(files) ### this is zero
-        #calling progressbar with it=0 so that when we initialize count = 0, we divide by 0 (in x)
-        input_to_check = self.maser_input            
+        num_files = len(files)
+        input_to_check = self.maser_input
         for i in progressbar(range(num_files), "Computing Delay: ", 80):
             file_name = files[i]
             try:
-                raw_acq(file_name)
-            except OSError: 
-                pass
-            maser = raw_acq.check_input(input_to_check)
+                acquisition = raw_acq(file_name)
+            except (OSError, KeyError, ValueError) as error:
+                warnings.warn(f"Skipping unreadable acquisition file {file_name!r}: {error}")
+                continue
+            maser = acquisition.check_input(input_to_check)
             maser.inspect_maser()
             taus.append(maser.time_fpga_count)
             delays.append(maser.tau)
             angles.append(maser.angles)
+
+        if not taus:
+            raise OSError(
+                f"No readable acquisition files were found in {os.path.abspath(self.folder_path)!r}."
+            )
             
         self.fpgatime = np.concatenate(taus, axis = 0)
         self.angles = np.concatenate(angles, axis = 0)
@@ -629,14 +731,38 @@ class analyse_maser:
         self.plt = plt
     
         
+def _list_acquisition_files(folder_path):
+    """Return regular, unlocked acquisition files in deterministic order.
+
+    Historical notebooks pass both directory names and wildcard patterns.
+    """
+    folder_path = os.fspath(folder_path)
+    if glob.has_magic(folder_path):
+        pattern = folder_path
+    elif os.path.isdir(folder_path):
+        pattern = os.path.join(folder_path, "*")
+    else:
+        pattern = folder_path
+    files = glob.glob(pattern)
+    return sorted(
+        file_path
+        for file_path in files
+        if os.path.isfile(file_path) and not file_path.lower().endswith(".lock")
+    )
+
+
 def get_newest_file(folder_path):
     '''
     
     
     
     '''
-    files = glob.glob(folder_path + "*[!.lock]")
-    newest_file = max(files, key=os.path.getctime)
+    files = _list_acquisition_files(folder_path)
+    if not files:
+        raise FileNotFoundError(
+            f"No acquisition files found in {os.path.abspath(folder_path)!r}."
+        )
+    newest_file = max(files, key=os.path.getmtime)
     return newest_file
 
 def get_second_newest_file(folder_path):
@@ -645,9 +771,12 @@ def get_second_newest_file(folder_path):
     
     
     '''
-    files = glob.glob(folder_path + "*[!.lock]")
-    newest_file = max(files, key=os.path.getctime)
+    files = _list_acquisition_files(folder_path)
+    if len(files) < 2:
+        raise FileNotFoundError(
+            f"Fewer than two acquisition files found in {os.path.abspath(folder_path)!r}."
+        )
+    newest_file = max(files, key=os.path.getmtime)
     files.remove(newest_file)
-    newest_file = max(files, key=os.path.getctime)
+    newest_file = max(files, key=os.path.getmtime)
     return newest_file
-
