@@ -1,0 +1,4 @@
+-r requirements.txt
+
+allantools>=2024.6
+jupyter>=1.0

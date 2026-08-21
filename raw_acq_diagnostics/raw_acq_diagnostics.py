@@ -185,24 +185,19 @@ class RawAcq(object):
         self,
         filenames: np.ndarray = None,
         dates: np.ndarray = None,
-        plot_dir: str = '/home//bandersen/raw_acq_diagnostics/',
-        raw_acq_dir: str = '/home/masuilab/data/raw_acq/',
+        plot_dir: str = '.',
+        raw_acq_dir: str = None,
     ):
         """ Instantiates a RawAcq object for a given set of files or date range. You must define
             one or the other!
         """
-        self.raw_acq_dir = raw_acq_dir
-        self.plot_dir = plot_dir
+        self.raw_acq_dir = None if raw_acq_dir is None else os.fspath(raw_acq_dir)
+        self.plot_dir = os.fspath(plot_dir)
         
         # Check to make sure parameters are in the right form
-        if not os.path.exists(plot_dir):
+        if not os.path.exists(self.plot_dir):
             raise RawAcqException(
-                "Output directory does not exist: {}".format(plot_dir)
-            )
-        
-        if not os.path.exists(raw_acq_dir):
-            raise RawAcqException(
-                "Raw acquisition directory does not exist: {}".format(raw_acq_dir)
+                "Output directory does not exist: {}".format(self.plot_dir)
             )
         
         if ((filenames is None) and (dates is None)) or \
@@ -212,6 +207,16 @@ class RawAcq(object):
             )
             
         if dates is not None:
+            if self.raw_acq_dir is None:
+                raise RawAcqException(
+                    "raw_acq_dir is required when loading by date."
+                )
+            if not os.path.exists(self.raw_acq_dir):
+                raise RawAcqException(
+                    "Raw acquisition directory does not exist: {}".format(
+                        self.raw_acq_dir
+                    )
+                )
             if len(dates) != 2 or \
                type(dates[0]) != datetime.datetime or \
                type(dates[1]) != datetime.datetime:
@@ -248,7 +253,7 @@ class RawAcq(object):
             An array of len=2 with UTC dates [start_date, end_date] indicating which filenames should be
             loaded into the RawAcq object for plotting purposes
         """
-        utc = pytz.timezone('UTC')
+        utc = pytz.utc
         # If dates provided, find filenames within those dates
         if dates is not None:
             start_date = dates[0]
@@ -265,41 +270,66 @@ class RawAcq(object):
             # {isotime}_{corr_name}_rawadc, 
             # where isotime is the time & date in ISO format,
             # and corr_name is a descriptive name for the run
-            raw_acq_dirs = glob.glob("{}/*_gbo_rawadc*".format(self.raw_acq_dir))
+            raw_acq_dirs = glob.glob(os.path.join(self.raw_acq_dir, "*_gbo_rawadc*"))
             raw_acq_dirs.sort(key=os.path.getmtime)
             raw_acq_dirs = np.array(raw_acq_dirs)
+            if len(raw_acq_dirs) == 0:
+                raise RawAcqException(
+                    "No raw acquisition directories found in: {}".format(
+                        self.raw_acq_dir
+                    )
+                )
             raw_acq_start_dates = np.array([dateutil.parser.isoparse(re.split("/|_", d)[-3]) for d in raw_acq_dirs])
             # TODO: Update this to be faster for more recent data? Will be important once we have been operating
             # for a while.
             inds = np.where((raw_acq_start_dates <= end_date))[0] # (raw_acq_start_dates >= start_date) & 
+            if len(inds) == 0:
+                raise RawAcqException(
+                    "No raw acquisition directories begin before the requested end date."
+                )
             if inds[0] - 1 >= 0:
                 inds = np.concatenate(([inds[0]-1], inds))
 
             # Then filter by files in those directories
             files = []
             for d in raw_acq_dirs[inds]:
-                fs = glob.glob("{}/*h5".format(d))
-                files = np.concatenate((files, fs))
-            files = files.tolist()
+                files.extend(glob.glob(os.path.join(d, "*.h5")))
+            if len(files) == 0:
+                raise RawAcqException("No HDF5 acquisition files found for the requested dates.")
             files.sort(key=os.path.getmtime)
-            file_dates = np.array([utc.localize(datetime.datetime.utcfromtimestamp((os.path.getmtime(f)))) for f in files])
+            file_dates = np.array([
+                datetime.datetime.fromtimestamp(os.path.getmtime(f), tz=utc)
+                for f in files
+            ])
             inds = np.where((file_dates >= start_date) & (file_dates <= end_date))[0]
             if len(inds) == 0:
                 time_delta = datetime.timedelta(hours=1)
                 inds = np.where((file_dates >= start_date-time_delta) & (file_dates <= end_date+time_delta))[0]
-            inds = np.concatenate((inds,[inds[-1]+1]))
-            inds = np.concatenate(([inds[0]-1],inds))
+            if len(inds) == 0:
+                raise RawAcqException("No HDF5 acquisition files overlap the requested dates.")
+            neighbor_inds = [max(inds[0] - 1, 0), *inds, min(inds[-1] + 1, len(files) - 1)]
+            inds = np.unique(neighbor_inds)
             filenames = np.array(files)[inds]
         
         # Read in filenames and populate data and metadata
         filenames = np.array(filenames).tolist()
         filenames.sort(key=os.path.getmtime)
-        file_dates = np.array([utc.localize(datetime.datetime.utcfromtimestamp((os.path.getmtime(f)))) for f in filenames])
+        file_dates = np.array([
+            datetime.datetime.fromtimestamp(os.path.getmtime(f), tz=utc)
+            for f in filenames
+        ])
         log.info("Reading in filenames corresponding to the following times:")
         for jj in range(len(filenames)):
             log.info("{} : {}".format(file_dates[jj].strftime("%Y-%m-%d %H:%M:%S"), filenames[jj]))
         
-        for ii, fn in enumerate(filenames):
+        crates_parts = []
+        slots_parts = []
+        inputs_parts = []
+        ctimes_parts = []
+        fpga_counts_parts = []
+        timestream_parts = []
+
+        for fn in filenames:
             # Skip any filenames that are still locked (actively being written)
             try:
                 f_h5 = h5py.File(fn, 'r')
@@ -330,26 +360,35 @@ class RawAcq(object):
             # Note that crate, fpga_slot, sma_input, ctime will have len=npackets
             
             f_h5.close()
-            
-            # Concatenate together timestream and metadata arrays
-            if ii == 0:
-                crates = crate
-                slots = fpga_slot
-                inputs = sma_input
-                ctimes = ctime
-                fpga_counts = fpga_count
-                timestream = timestream_fn
-            else:
-                crates = np.concatenate((crates, crate))
-                slots = np.concatenate((slots, fpga_slot))
-                inputs = np.concatenate((inputs, sma_input))
-                ctimes = np.concatenate((ctimes, ctime))
-                fpga_counts = np.concatenate((fpga_counts, fpga_count))
-                timestream = np.concatenate((timestream, timestream_fn))
+
+            crates_parts.append(crate)
+            slots_parts.append(fpga_slot)
+            inputs_parts.append(sma_input)
+            ctimes_parts.append(ctime)
+            fpga_counts_parts.append(fpga_count)
+            timestream_parts.append(timestream_fn)
+
+        if not timestream_parts:
+            raise RawAcqException("None of the selected acquisition files could be read.")
+
+        crates = np.concatenate(crates_parts)
+        slots = np.concatenate(slots_parts)
+        inputs = np.concatenate(inputs_parts)
+        ctimes = np.concatenate(ctimes_parts)
+        fpga_counts = np.concatenate(fpga_counts_parts)
+        timestream = np.concatenate(timestream_parts)
         
         # Complete one more time filter for time at the frame level (30 second resolution)
-        frame_datetimes = np.array([pytz.utc.localize(datetime.datetime.fromtimestamp(ctime)) for ctime in ctimes])
-        inds = np.where((frame_datetimes >= start_date) & (frame_datetimes <= end_date))[0]
+        frame_datetimes = np.array([
+            datetime.datetime.fromtimestamp(ctime, tz=utc)
+            for ctime in ctimes
+        ])
+        if dates is None:
+            inds = np.arange(len(ctimes))
+        else:
+            inds = np.where((frame_datetimes >= start_date) & (frame_datetimes <= end_date))[0]
+        if len(inds) == 0:
+            raise RawAcqException("No acquisition frames overlap the requested dates.")
         
         # Save the final arrays in the object
         self.crates = crates[inds]
@@ -361,16 +400,22 @@ class RawAcq(object):
         
         # Calculate and save some metadata
         # ctime timestamp of first frame in this file
-        self.start_time = utc.localize(datetime.datetime.fromtimestamp(self.ctimes[0]))
+        self.start_time = datetime.datetime.fromtimestamp(self.ctimes[0], tz=utc)
         # ctime timestamp of last frame in this file
-        self.end_time = utc.localize(datetime.datetime.fromtimestamp(self.ctimes[-1]))
-        # Figure out the frame time for each unique frame, and, therefore, how many frames were saved
-        uniq_fpga_count, iuniq, itime = np.unique(self.fpga_counts, return_index=True, return_inverse=True)
+        self.end_time = datetime.datetime.fromtimestamp(self.ctimes[-1], tz=utc)
+        # A counter can reset or repeat across files, so identify frames by the
+        # timestamp/counter pair and retain their original read order.
+        frame_keys = np.rec.fromarrays(
+            (self.ctimes, self.fpga_counts),
+            names=("ctime", "fpga_count"),
+        )
+        _, iuniq = np.unique(frame_keys, return_index=True)
+        iuniq.sort()
         self.ctime_frames = self.ctimes[iuniq]
         self.num_crates = np.max(self.crates) + 1
         self.num_slots = np.max(self.slots) + 1
         self.num_inputs = np.max(self.inputs) + 1
-        self.num_frames = len(self.ctime_frames) + 1
+        self.num_frames = len(self.ctime_frames)
       
     
     def get_timestream_for_input(self, crate_number : int, slot_number : int, input_number : int):
@@ -614,7 +659,7 @@ class RawAcq(object):
         else:
             plot_name = "{}/{}.pdf".format(
                 self.plot_dir,
-                plot_name,
+                plot_filename,
             )
         log.info("Outputting plot to: {}".format(plot_name))
         p = PdfPages(plot_name)
@@ -847,15 +892,15 @@ class RawAcq(object):
         ctimes_all = []
         fft_all = []
 
+        bad_input_set = {tuple(map(int, bad_input)) for bad_input in bad_inputs}
         for ii in inputs:
             crate_number = ii[0]
             slot_number = ii[1]
             input_number = ii[2]
-            
-            for bi in BAD_INPUTS:
-                if bi[0] == ii[0] and bi[1] == ii[1] and bi[2] == ii[2]:
-                    log.info("Skipping bad input {}".format(ii))
-                    continue
+
+            if tuple(map(int, ii)) in bad_input_set:
+                log.info("Skipping bad input {}".format(ii))
+                continue
 
             fft, _ = self.calc_fft(crate_number, slot_number, input_number)
             _, ctimes, _ = self.get_timestream_for_input(crate_number, slot_number, input_number)
@@ -880,7 +925,10 @@ class RawAcq(object):
         fft_all_flagged = fft_all
         log.info("Sum dynamic spectrum over all inputs")
         fft_all_summed = np.sum(fft_all_flagged, axis=0)
-        ctimes_all_averaged = np.array([pytz.utc.localize(datetime.datetime.fromtimestamp(ctime)) for ctime in np.mean(ctimes_all, axis=0)])
+        ctimes_all_averaged = np.array([
+            datetime.datetime.fromtimestamp(ctime, tz=pytz.utc)
+            for ctime in np.mean(ctimes_all, axis=0)
+        ])
         start_time = self.start_time
         end_time = self.end_time
 
@@ -1052,7 +1100,7 @@ class RawAcq(object):
         else:
             plot_name = "{}/{}.pdf".format(
                 self.plot_dir,
-                plot_name,
+                plot_filename,
             )
         log.info("Outputting plot to: {}".format(plot_name))
         p = PdfPages(plot_name)
@@ -1071,7 +1119,10 @@ class RawAcq(object):
             fft, _ = self.calc_fft(crate_number, slot_number, input_number)
             _, ctimes, _ = self.get_timestream_for_input(crate_number, slot_number, input_number)
             
-            ctimes_dates = np.array([pytz.utc.localize(datetime.datetime.fromtimestamp(ctime)) for ctime in ctimes])
+            ctimes_dates = np.array([
+                datetime.datetime.fromtimestamp(ctime, tz=pytz.utc)
+                for ctime in ctimes
+            ])
             start_time = self.start_time
             end_time = self.end_time
             # Note: will be the same for determining transit time regardless of site, 
@@ -1273,7 +1324,8 @@ def plot_maintenance_vs_nonmaintenance_timeseries(
     plot_filename = None,
     bad_inputs = BAD_INPUTS,
     figsize = (11,5),
-    plot_dir = './'
+    plot_dir = './',
+    raw_acq_dir = None,
 ):
     """ This function creates plots showing a band-averaged and input-averaged 24 hr timeseries of 
         the raw acq data, with two panels splitting between maintenance and non-maintenance days. 
@@ -1298,6 +1350,8 @@ def plot_maintenance_vs_nonmaintenance_timeseries(
             The name of the plot file, if you want it to be different than default
         bad_inputs : list of int
             An Nx3 list specifying bad inputs to avoid. Each N entry is a coordinate: [crate, slot, input]
+        raw_acq_dir : str
+            Directory containing the dated raw-acquisition subdirectories.
         
         Outputs
         -------
@@ -1333,7 +1387,7 @@ def plot_maintenance_vs_nonmaintenance_timeseries(
     else:
         plot_name = "{}/{}.pdf".format(
             plot_dir,
-            plot_name,
+            plot_filename,
         )
 
     log.info("Flagging bad inputs")
@@ -1342,13 +1396,11 @@ def plot_maintenance_vs_nonmaintenance_timeseries(
     slot_numbers = np.arange(16)
     inputs = np.array(list(itertools.product(crate_numbers, slot_numbers, input_numbers)), dtype=int)
     inputs_flagged = []
+    bad_input_set = {tuple(map(int, bad_input)) for bad_input in bad_inputs}
     for ii in inputs:
-        bad_input = False
-        for bi in BAD_INPUTS:
-            if bi[0] == ii[0] and bi[1] == ii[1] and bi[2] == ii[2]:
-                log.info("Flagging bad input {}".format(ii))
-                bad_input = True
-        if not bad_input:
+        if tuple(map(int, ii)) in bad_input_set:
+            log.info("Flagging bad input {}".format(ii))
+        else:
             inputs_flagged.append(ii)
     inputs = np.array(inputs_flagged)
     
@@ -1367,7 +1419,7 @@ def plot_maintenance_vs_nonmaintenance_timeseries(
             start_date_utc,
             end_date_utc,
         ])
-        raw_acq = RawAcq(dates=dates)
+        raw_acq = RawAcq(dates=dates, raw_acq_dir=raw_acq_dir)
 
         log.info("Calculating {} for all inputs on dates {} to {}".format(plot_types, dates[0].strftime("%Y-%m-%d %H:%M:%S"), dates[1].strftime("%Y-%m-%d %H:%M:%S")))
         ts_inputs = {}
@@ -1556,10 +1608,17 @@ def main():
         end_date_utc,
     ])
 
+    raw_acq_dir = os.environ.get("RAW_ACQ_DIR")
+    if raw_acq_dir is None:
+        raise RawAcqException(
+            "Set RAW_ACQ_DIR before running raw_acq_diagnostics.py directly."
+        )
+
     # Read in the data
-    raw_acq = RawAcq(dates=dates)
+    raw_acq = RawAcq(dates=dates, raw_acq_dir=raw_acq_dir)
 
     # Make PDFs showing individual dynamic spectra for all inputs for the given time period
+    crate_number = 0
     for slot in range(16):
         raw_acq.plot_slot_dynamic_spectrum_summary(crate_number, slot, mask_rfi=False, mask_sun=False, ds_time_factor=1, ds_freq_factor=1, save_plot=True)
 
