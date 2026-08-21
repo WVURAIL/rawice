@@ -1,0 +1,9 @@
+-r requirements.txt
+
+beautifulsoup4>=4.12
+chime-frb-constants==2020.12
+click>=8.1
+ephem>=4.1
+python-dateutil>=2.8
+pytz>=2023.3
+requests>=2.31
