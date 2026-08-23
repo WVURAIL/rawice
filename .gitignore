@@ -1,0 +1,13 @@
+__pycache__/
+*.py[cod]
+.venv/
+venv/
+*.egg-info/
+.pytest_cache/
+*.log
+*.dat
+*.raw
+*.h5
+
+# Jupyter
+.ipynb_checkpoints/
