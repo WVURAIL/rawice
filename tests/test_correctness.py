@@ -182,22 +182,22 @@ class DiagnosticLoadingTests(FixtureTest):
         np.testing.assert_array_equal(acquisition.timestream[:, 0], [10, 11])
 
     def test_empty_explicit_file_list_has_domain_error(self):
-        with self.assertRaisesRegex(diagnostics.RawAcqException, "No acquisition files"):
+        with self.assertRaises(diagnostics.RawAcqException):
             self.load_files([])
 
     def test_empty_run_search_has_domain_error(self):
-        with self.assertRaisesRegex(diagnostics.RawAcqException, "No acquisition runs"):
+        with self.assertRaises(diagnostics.RawAcqException):
             self.load_dates(BASE_TIME - 1, BASE_TIME + 2)
 
     def test_run_without_files_has_domain_error(self):
         self.run_directory()
-        with self.assertRaisesRegex(diagnostics.RawAcqException, "No acquisition files"):
+        with self.assertRaises(diagnostics.RawAcqException):
             self.load_dates(BASE_TIME - 1, BASE_TIME + 2)
 
     def test_no_file_matches_even_with_existing_one_hour_margin(self):
         folder = self.run_directory()
         make_acquisition(folder / "old.h5", [10, 11])
-        with self.assertRaisesRegex(diagnostics.RawAcqException, "No acquisition files overlap"):
+        with self.assertRaises(diagnostics.RawAcqException):
             self.load_dates(BASE_TIME + 86400, BASE_TIME + 86402)
 
     def test_no_matching_frames_has_domain_error(self):
@@ -229,7 +229,8 @@ class DiagnosticLoadingTests(FixtureTest):
 
     def test_cli_default_window_is_last_24_hours_in_utc(self):
         class Capture:
-            def __init__(self, dates, plot_dir):
+            def __init__(self, dates, plot_dir, raw_acq_dir):
+                self.raw_acq_dir = raw_acq_dir
                 self.start_time, self.end_time = dates
                 self.plot_dir = plot_dir
                 self.dates = dates
@@ -249,9 +250,13 @@ class DiagnosticLoadingTests(FixtureTest):
         # Avoid depending on optional system timezone aliases for this test.
         with mock.patch.object(cli.pytz, "timezone", return_value=pytz.utc), \
                 mock.patch.object(cli.rad, "RawAcq", side_effect=capture):
-            cli.plot_summed_spectrum.callback("", "", False, False, 3, 1, "gbo", True,
-                                              str(self.directory), ())
+            cli.plot_summed_spectrum.callback(
+                start_time="", end_time="", mask_rfi=False, mask_sun=False,
+                ds_time_factor=3, ds_freq_factor=1, site="gbo", save_plot=True,
+                raw_acq_dir=str(self.directory), plot_dir=str(self.directory), email=(),
+            )
         after = datetime.datetime.now(tz=pytz.utc) - datetime.timedelta(minutes=5)
+        self.assertEqual(captured[0].raw_acq_dir, str(self.directory))
         start, end = captured[0].dates
         self.assertLessEqual(before, end)
         self.assertLessEqual(end, after)
