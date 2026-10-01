@@ -181,7 +181,7 @@ def plot_summed_spectrum(
     
     # If start_time and end_time are not provided, select the last 24 hours
     if start_time == "" or end_time == "":
-        end_time_utc = (datetime.datetime.utcnow() - datetime.timedelta(minutes=5)).astimezone(utc)
+        end_time_utc = datetime.datetime.now(tz=utc) - datetime.timedelta(minutes=5)
         start_time_utc = (end_time_utc - datetime.timedelta(hours=24)).astimezone(utc)
     else:
         # Else, check that start_time and end_time are formatted properly

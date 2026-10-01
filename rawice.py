@@ -11,6 +11,7 @@ import glob
 import os.path
 from scipy.signal import get_window
 import sys
+import functools
 from scipy.optimize import curve_fit
 
 
@@ -73,7 +74,29 @@ def objective(x, amp, stability, phase, vertical):
     '''
     return np.abs(amp) * np.cos(2*np.pi*10*stability*x/800 + phase) + vertical
     
-class raw_acq:
+class _AcquisitionHelper:
+    """Bind a helper to an instance, with legacy latest-acquisition fallback."""
+
+    def __init__(self, helper):
+        self.helper = helper
+
+    def __get__(self, instance, owner):
+        acquisition = instance if instance is not None else owner._latest_acquisition
+        if acquisition is None:
+            raise RuntimeError("Load a raw_acq before requesting an input or iceboard.")
+        return functools.partial(self.helper, acquisition)
+
+
+class _AcquisitionMeta(type):
+    def __getattr__(cls, name):
+        # Older notebooks access arrays through raw_acq after loading a file.
+        if name in {"timestream", "timestamp", "crate", "slot", "adc_input",
+                    "start_time", "end_time"} and cls._latest_acquisition is not None:
+            return getattr(cls._latest_acquisition, name)
+        raise AttributeError(f"{cls.__name__!r} has no attribute {name!r}")
+
+
+class raw_acq(metaclass=_AcquisitionMeta):
     '''
     
     Inputs: a string (path to a single acq file)
@@ -83,6 +106,8 @@ class raw_acq:
         calculate values and assign them to this object.
     
     '''
+    _latest_acquisition = None
+
     def __init__(self, raw_acq_file, diagnostics = False):
         '''
         
@@ -122,8 +147,8 @@ class raw_acq:
 
         fpga_counts = np.hstack(timestamp['fpga_count'])
         ctime = np.hstack(timestamp['ctime'])
-        start_time = datetime.datetime.fromtimestamp(ctime[0]).isoformat()
-        end_time = datetime.datetime.fromtimestamp(ctime[-1]).isoformat()
+        start_time = datetime.datetime.fromtimestamp(ctime[0], tz=datetime.timezone.utc).isoformat()
+        end_time = datetime.datetime.fromtimestamp(ctime[-1], tz=datetime.timezone.utc).isoformat()
 
         adc_record_fpga_count_index = np.where(np.roll(fpga_counts,1)!=fpga_counts)[0]
         adc_record_ctime_index = np.where(np.roll(ctime,1)!=ctime)[0]
@@ -137,13 +162,14 @@ class raw_acq:
         self.num_crates = np.max(crate) + 1
         self.num_slots = np.max(slot) + 1
         self.num_timestamps = adc_record_fpga_count.shape[0] + 1
-        raw_acq.timestream = timestream.astype(int)
-        raw_acq.timestamp = timestamp
-        raw_acq.crate = crate
-        raw_acq.slot = slot
-        raw_acq.adc_input = adc_input
-        raw_acq.start_time = start_time
-        raw_acq.end_time = end_time
+        self.timestream = timestream.astype(int)
+        self.timestamp = timestamp
+        self.crate = crate
+        self.slot = slot
+        self.adc_input = adc_input
+        self.start_time = start_time
+        self.end_time = end_time
+        type(self)._latest_acquisition = self
         print("Loaded raw acq HDF5 file ... \r")
        
     def diagostics(self):
@@ -167,8 +193,8 @@ class raw_acq:
         print(f"Timestamping_warning: {self.hdf5.attrs['timestamping_warning'].decode()}")
         print()
 
-        print(f"ctime Timestamp of first raw_adc frame: {raw_acq.start_time}")
-        print(f"ctime Timestamp of last raw_adc frame: {raw_acq.end_time}")
+        print(f"ctime Timestamp of first raw_adc frame: {self.start_time}")
+        print(f"ctime Timestamp of last raw_adc frame: {self.end_time}")
         print()
         
         plt.figure(figsize=(15,3))
@@ -180,6 +206,7 @@ class raw_acq:
         plt.title("Time since last adc capture")
         
         
+    @_AcquisitionHelper
     class check_input:
         '''
         
@@ -191,7 +218,7 @@ class raw_acq:
             that holds information for a single input. 
             
         '''
-        def __init__(single_inp, input_to_check):
+        def __init__(single_inp, acquisition, input_to_check):
             '''
             
             Input: a single array corresponding to the input on the ICE board [crate number, slot number, input number]
@@ -202,6 +229,7 @@ class raw_acq:
             
             '''
             print(f"Checking input {input_to_check} ... \r")
+            single_inp._acquisition = acquisition
             single_inp.input_to_check = input_to_check
             single_inp.get_timestream_for_input()
             single_inp.get_single_input_rms()
@@ -221,26 +249,13 @@ class raw_acq:
             This function is automatically called when the check_input() object gets initialized.
             
             '''
-            itc = single_inp.input_to_check
-            input_number = itc[2]
-            crate_number = itc[1]
-            slot_number = itc[0]
-            
-            single_inp.time_stamps = raw_acq.timestamp[np.intersect1d(
-                np.where(
-                    raw_acq.adc_input == input_number),
-                np.where(
-                    raw_acq.crate == crate_number),
-                np.where(
-                    raw_acq.slot == slot_number)
-            )]
-            single_inp.time_streams = raw_acq.timestream[np.intersect1d(
-                np.where(
-                    raw_acq.adc_input == input_number),
-                np.where(
-                    raw_acq.crate == crate_number),
-                np.where(
-                    raw_acq.slot == slot_number))]
+            crate_number, slot_number, input_number = single_inp.input_to_check
+            acquisition = single_inp._acquisition
+            mask = ((acquisition.crate == crate_number)
+                    & (acquisition.slot == slot_number)
+                    & (acquisition.adc_input == input_number))
+            single_inp.time_stamps = acquisition.timestamp[mask]
+            single_inp.time_streams = acquisition.timestream[mask]
             input_id = {}
             input_id["crate"] = crate_number 
             input_id["slot"] = slot_number
@@ -479,17 +494,19 @@ class raw_acq:
                 
             
     
+    @_AcquisitionHelper
     class check_iceboard:
         """
             Check adc rms of all inputs of an iceboard of a given crate and slot from a singel raw_acq file
         """
-        def __init__(iceboard, crate, slot): #, time_slice):
+        def __init__(iceboard, acquisition, crate, slot): #, time_slice):
             '''
             
             
             
             '''
             #iceboard.time_slice = time_slice
+            iceboard._acquisition = acquisition
             iceboard.crate = crate
             iceboard.slot = slot
             iceboard.full_acq_capture_diagnostic()
@@ -500,15 +517,18 @@ class raw_acq:
             """
             #if iceboard.time_slice: 
             #    timeslice = iceboard.time_slice
+            acquisition = iceboard._acquisition
             ant_std = np.zeros(16)
             ant_rms = np.zeros(16)
             plt.figure(figsize=(15,8))
-            plt.suptitle(f"total adc_rms of (crate,slot){iceboard.crate}{iceboard.slot} between {raw_acq.start_time} and {raw_acq.end_time}")
+            plt.suptitle(f"total adc_rms of (crate,slot){iceboard.crate}{iceboard.slot} between {acquisition.start_time} and {acquisition.end_time}")
             #print("\n\n")
             #print("(crate,slot,input),rms,log2std")
             for i in range(16):
-                inp0 = np.where(raw_acq.adc_input[:] == i)[0]
-                ant0_data = raw_acq.timestream[:][inp0]
+                inp0 = ((acquisition.crate == iceboard.crate)
+                        & (acquisition.slot == iceboard.slot)
+                        & (acquisition.adc_input == i))
+                ant0_data = acquisition.timestream[inp0]
                 ant0_data = ant0_data[:]
                 #ant_rms[i] = np.sqrt(np.mean(ant0_data)**2)
                 #ant_std[i] =  np.log2(np.std(ant0_data))

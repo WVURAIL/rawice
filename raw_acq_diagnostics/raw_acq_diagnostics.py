@@ -272,6 +272,8 @@ class RawAcq(object):
             # TODO: Update this to be faster for more recent data? Will be important once we have been operating
             # for a while.
             inds = np.where((raw_acq_start_dates <= end_date))[0] # (raw_acq_start_dates >= start_date) & 
+            if len(inds) == 0:
+                raise RawAcqException("No acquisition runs overlap the requested dates.")
             if inds[0] - 1 >= 0:
                 inds = np.concatenate(([inds[0]-1], inds))
 
@@ -280,21 +282,29 @@ class RawAcq(object):
             for d in raw_acq_dirs[inds]:
                 fs = glob.glob("{}/*h5".format(d))
                 files = np.concatenate((files, fs))
+            if len(files) == 0:
+                raise RawAcqException("No acquisition files found for the requested dates.")
             files = files.tolist()
             files.sort(key=os.path.getmtime)
-            file_dates = np.array([utc.localize(datetime.datetime.utcfromtimestamp((os.path.getmtime(f)))) for f in files])
+            file_dates = np.array([datetime.datetime.fromtimestamp(os.path.getmtime(f), tz=utc) for f in files])
             inds = np.where((file_dates >= start_date) & (file_dates <= end_date))[0]
             if len(inds) == 0:
                 time_delta = datetime.timedelta(hours=1)
                 inds = np.where((file_dates >= start_date-time_delta) & (file_dates <= end_date+time_delta))[0]
-            inds = np.concatenate((inds,[inds[-1]+1]))
-            inds = np.concatenate(([inds[0]-1],inds))
+            if len(inds) == 0:
+                raise RawAcqException("No acquisition files overlap the requested dates.")
+            if inds[-1] + 1 < len(files):
+                inds = np.concatenate((inds, [inds[-1] + 1]))
+            if inds[0] > 0:
+                inds = np.concatenate(([inds[0] - 1], inds))
             filenames = np.array(files)[inds]
         
         # Read in filenames and populate data and metadata
         filenames = np.array(filenames).tolist()
+        if len(filenames) == 0:
+            raise RawAcqException("No acquisition files were provided.")
         filenames.sort(key=os.path.getmtime)
-        file_dates = np.array([utc.localize(datetime.datetime.utcfromtimestamp((os.path.getmtime(f)))) for f in filenames])
+        file_dates = np.array([datetime.datetime.fromtimestamp(os.path.getmtime(f), tz=utc) for f in filenames])
         log.info("Reading in filenames corresponding to the following times:")
         for jj in range(len(filenames)):
             log.info("{} : {}".format(file_dates[jj].strftime("%Y-%m-%d %H:%M:%S"), filenames[jj]))
@@ -348,8 +358,13 @@ class RawAcq(object):
                 timestream = np.concatenate((timestream, timestream_fn))
         
         # Complete one more time filter for time at the frame level (30 second resolution)
-        frame_datetimes = np.array([pytz.utc.localize(datetime.datetime.fromtimestamp(ctime)) for ctime in ctimes])
-        inds = np.where((frame_datetimes >= start_date) & (frame_datetimes <= end_date))[0]
+        frame_datetimes = np.array([datetime.datetime.fromtimestamp(ctime, tz=pytz.utc) for ctime in ctimes])
+        if dates is not None:
+            inds = np.where((frame_datetimes >= start_date) & (frame_datetimes <= end_date))[0]
+        else:
+            inds = np.arange(len(ctimes))
+        if len(inds) == 0:
+            raise RawAcqException("No acquisition frames overlap the requested dates.")
         
         # Save the final arrays in the object
         self.crates = crates[inds]
@@ -361,9 +376,9 @@ class RawAcq(object):
         
         # Calculate and save some metadata
         # ctime timestamp of first frame in this file
-        self.start_time = utc.localize(datetime.datetime.fromtimestamp(self.ctimes[0]))
+        self.start_time = datetime.datetime.fromtimestamp(self.ctimes[0], tz=utc)
         # ctime timestamp of last frame in this file
-        self.end_time = utc.localize(datetime.datetime.fromtimestamp(self.ctimes[-1]))
+        self.end_time = datetime.datetime.fromtimestamp(self.ctimes[-1], tz=utc)
         # Figure out the frame time for each unique frame, and, therefore, how many frames were saved
         uniq_fpga_count, iuniq, itime = np.unique(self.fpga_counts, return_index=True, return_inverse=True)
         self.ctime_frames = self.ctimes[iuniq]
@@ -880,7 +895,7 @@ class RawAcq(object):
         fft_all_flagged = fft_all
         log.info("Sum dynamic spectrum over all inputs")
         fft_all_summed = np.sum(fft_all_flagged, axis=0)
-        ctimes_all_averaged = np.array([pytz.utc.localize(datetime.datetime.fromtimestamp(ctime)) for ctime in np.mean(ctimes_all, axis=0)])
+        ctimes_all_averaged = np.array([datetime.datetime.fromtimestamp(ctime, tz=pytz.utc) for ctime in np.mean(ctimes_all, axis=0)])
         start_time = self.start_time
         end_time = self.end_time
 
@@ -1071,7 +1086,7 @@ class RawAcq(object):
             fft, _ = self.calc_fft(crate_number, slot_number, input_number)
             _, ctimes, _ = self.get_timestream_for_input(crate_number, slot_number, input_number)
             
-            ctimes_dates = np.array([pytz.utc.localize(datetime.datetime.fromtimestamp(ctime)) for ctime in ctimes])
+            ctimes_dates = np.array([datetime.datetime.fromtimestamp(ctime, tz=pytz.utc) for ctime in ctimes])
             start_time = self.start_time
             end_time = self.end_time
             # Note: will be the same for determining transit time regardless of site, 
