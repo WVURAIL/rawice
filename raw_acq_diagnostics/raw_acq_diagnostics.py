@@ -908,6 +908,9 @@ class RawAcq(object):
             fft_all.append(fft)
             ctimes_all.append(ctimes)
 
+        if not fft_all:
+            raise RawAcqException("No unmasked inputs remain for the summed spectrum.")
+
         # Calculate the minimum number of frames for each input and even out the array
         # TODO: explore why there are fewer frames for some inputs
         n_frames = []
