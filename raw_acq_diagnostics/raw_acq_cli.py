@@ -1,6 +1,9 @@
 import dateutil, pytz, datetime
 import numpy as np
-import raw_acq_diagnostics as rad
+if __package__:
+    from . import raw_acq_diagnostics as rad
+else:  # Support direct execution from this directory.
+    import raw_acq_diagnostics as rad
 import click
 import smtplib
 import os
@@ -180,9 +183,14 @@ def plot_summed_spectrum(
     utc = pytz.utc
     
     # If start_time and end_time are not provided, select the last 24 hours
-    if start_time == "" or end_time == "":
+    if start_time == "" and end_time == "":
         end_time_utc = datetime.datetime.now(tz=utc) - datetime.timedelta(minutes=5)
         start_time_utc = (end_time_utc - datetime.timedelta(hours=24)).astimezone(utc)
+    elif start_time == "" or end_time == "":
+        raise click.BadParameter(
+            "provide both --start-time and --end-time, or omit both",
+            param_hint="--start-time/--end-time",
+        )
     else:
         # Else, check that start_time and end_time are formatted properly
         try:
@@ -194,9 +202,11 @@ def plot_summed_spectrum(
             end_time_et = est.localize(end_time_dt)
             start_time_utc = start_time_et.astimezone(utc)
             end_time_utc = end_time_et.astimezone(utc)
-        except Exception as e:
-            print("Exception encountered: {}".format(e))
-            exit()
+        except ValueError as error:
+            raise click.BadParameter(
+                "times must use YYYY-MM-DD HH:mm:ss",
+                param_hint="--start-time/--end-time",
+            ) from error
 
     dates = np.array([
         start_time_utc,
@@ -232,7 +242,7 @@ def plot_summed_spectrum(
     
     # If email is provided, send email
     if len(email) != 0:
-        if username is not None or app_password is not None:
+        if username is not None and app_password is not None:
             files = [plot_name]
             email_text = 'Greetings,\n\nYou are subscribed to the CHIME/FRB GBO outrigger data quality emails. Attached is the following:\n\t(1) A PDF containing a dynamic spectrum of the raw data coming out of the analog-to-digital converters attached to each feed. Specifically, this is the total dynamic spectrum summed over each feed.\n If you have any questions about the contents of this email, feel free to reach out to CHIME/FRB grad student Bridget Andersen at bridgetcandersen@gmail.com.\n Cheers,\n\n Bridget Andersen'
             subject = 'CHIME/FRB Outriggers Data Quality'

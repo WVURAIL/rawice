@@ -200,7 +200,7 @@ class RawAcq(object):
                 "Output directory does not exist: {}".format(plot_dir)
             )
         
-        if not os.path.exists(raw_acq_dir):
+        if dates is not None and not os.path.exists(raw_acq_dir):
             raise RawAcqException(
                 "Raw acquisition directory does not exist: {}".format(raw_acq_dir)
             )
@@ -309,7 +309,8 @@ class RawAcq(object):
         for jj in range(len(filenames)):
             log.info("{} : {}".format(file_dates[jj].strftime("%Y-%m-%d %H:%M:%S"), filenames[jj]))
         
-        for ii, fn in enumerate(filenames):
+        loaded_file = False
+        for fn in filenames:
             # Skip any filenames that are still locked (actively being written)
             try:
                 f_h5 = h5py.File(fn, 'r')
@@ -342,7 +343,8 @@ class RawAcq(object):
             f_h5.close()
             
             # Concatenate together timestream and metadata arrays
-            if ii == 0:
+            if not loaded_file:
+                loaded_file = True
                 crates = crate
                 slots = fpga_slot
                 inputs = sma_input
@@ -357,6 +359,9 @@ class RawAcq(object):
                 fpga_counts = np.concatenate((fpga_counts, fpga_count))
                 timestream = np.concatenate((timestream, timestream_fn))
         
+        if not loaded_file:
+            raise RawAcqException("None of the selected acquisition files could be read.")
+
         # Complete one more time filter for time at the frame level (30 second resolution)
         frame_datetimes = np.array([datetime.datetime.fromtimestamp(ctime, tz=pytz.utc) for ctime in ctimes])
         if dates is not None:
@@ -380,12 +385,16 @@ class RawAcq(object):
         # ctime timestamp of last frame in this file
         self.end_time = datetime.datetime.fromtimestamp(self.ctimes[-1], tz=utc)
         # Figure out the frame time for each unique frame, and, therefore, how many frames were saved
-        uniq_fpga_count, iuniq, itime = np.unique(self.fpga_counts, return_index=True, return_inverse=True)
+        # Counter values can repeat after a reset; keep distinct times in read order.
+        frame_keys = np.rec.fromarrays((self.ctimes, self.fpga_counts),
+                                       names=("ctime", "fpga_count"))
+        _, iuniq = np.unique(frame_keys, return_index=True)
+        iuniq.sort()
         self.ctime_frames = self.ctimes[iuniq]
         self.num_crates = np.max(self.crates) + 1
         self.num_slots = np.max(self.slots) + 1
         self.num_inputs = np.max(self.inputs) + 1
-        self.num_frames = len(self.ctime_frames) + 1
+        self.num_frames = len(self.ctime_frames)
       
     
     def get_timestream_for_input(self, crate_number : int, slot_number : int, input_number : int):
@@ -629,7 +638,7 @@ class RawAcq(object):
         else:
             plot_name = "{}/{}.pdf".format(
                 self.plot_dir,
-                plot_name,
+                plot_filename,
             )
         log.info("Outputting plot to: {}".format(plot_name))
         p = PdfPages(plot_name)
@@ -861,22 +870,25 @@ class RawAcq(object):
         # Keep track of ctimes to help with masking solar transit
         ctimes_all = []
         fft_all = []
+        bad_input_set = {tuple(bad_input) for bad_input in bad_inputs}
 
         for ii in inputs:
             crate_number = ii[0]
             slot_number = ii[1]
             input_number = ii[2]
             
-            for bi in BAD_INPUTS:
-                if bi[0] == ii[0] and bi[1] == ii[1] and bi[2] == ii[2]:
-                    log.info("Skipping bad input {}".format(ii))
-                    continue
+            if tuple(ii) in bad_input_set:
+                log.info("Skipping bad input {}".format(ii))
+                continue
 
             fft, _ = self.calc_fft(crate_number, slot_number, input_number)
             _, ctimes, _ = self.get_timestream_for_input(crate_number, slot_number, input_number)
 
             fft_all.append(fft)
             ctimes_all.append(ctimes)
+
+        if not fft_all:
+            raise RawAcqException("No unmasked inputs remain for the summed spectrum.")
 
         # Calculate the minimum number of frames for each input and even out the array
         # TODO: explore why there are fewer frames for some inputs
@@ -1067,7 +1079,7 @@ class RawAcq(object):
         else:
             plot_name = "{}/{}.pdf".format(
                 self.plot_dir,
-                plot_name,
+                plot_filename,
             )
         log.info("Outputting plot to: {}".format(plot_name))
         p = PdfPages(plot_name)
@@ -1348,7 +1360,7 @@ def plot_maintenance_vs_nonmaintenance_timeseries(
     else:
         plot_name = "{}/{}.pdf".format(
             plot_dir,
-            plot_name,
+            plot_filename,
         )
 
     log.info("Flagging bad inputs")
@@ -1359,7 +1371,7 @@ def plot_maintenance_vs_nonmaintenance_timeseries(
     inputs_flagged = []
     for ii in inputs:
         bad_input = False
-        for bi in BAD_INPUTS:
+        for bi in bad_inputs:
             if bi[0] == ii[0] and bi[1] == ii[1] and bi[2] == ii[2]:
                 log.info("Flagging bad input {}".format(ii))
                 bad_input = True
@@ -1575,6 +1587,7 @@ def main():
     raw_acq = RawAcq(dates=dates)
 
     # Make PDFs showing individual dynamic spectra for all inputs for the given time period
+    crate_number = 0
     for slot in range(16):
         raw_acq.plot_slot_dynamic_spectrum_summary(crate_number, slot, mask_rfi=False, mask_sun=False, ds_time_factor=1, ds_freq_factor=1, save_plot=True)
 

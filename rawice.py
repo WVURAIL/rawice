@@ -12,6 +12,7 @@ import os.path
 from scipy.signal import get_window
 import sys
 import functools
+import warnings
 from scipy.optimize import curve_fit
 
 
@@ -44,14 +45,13 @@ def progressbar(it, prefix="", size=60, out=sys.stdout):
     
     DONE reading files and getting delays
     
-    A possible error:
-    Getting a 'divide by zero' error within the progressbar() function when calling analyse_maser()
-        Make sure that the raw acq folder variable has a '/' at the end. 
-        raw_acq_folder = "home/users/path/acq" will yield this error
-        raw_acq_folder = "home/users/path/acq/" will not yield this error
+    Empty iterables complete without attempting to divide by zero.
         
     '''
     count = len(it)
+    if count == 0:
+        print(f"Done {prefix}\n", flush=True, file=out)
+        return
     def show(j):
         x = int(size*j/count) ### dividing by 0 here
         print("{}[{}{}] {}/{}".format(prefix, u"#"*x, "."*(size-x), j, count), end='\r', file=out, flush=True)
@@ -138,11 +138,19 @@ class raw_acq(metaclass=_AcquisitionMeta):
         index_map = self.hdf5['index_map']
         im_timestream = index_map['timestream'][:]
         #im_snapshot = index_map['snapshot'][:]
-        adc_input = np.hstack(self.hdf5['adc_input'][:])
-        crate = np.hstack(self.hdf5['crate'][:])
-        slot = np.hstack(self.hdf5['slot'][:])
-        timestamp = np.hstack(self.hdf5['timestamp'][:])
+        adc_input_data = self.hdf5['adc_input'][:]
+        crate_data = self.hdf5['crate'][:]
+        slot_data = self.hdf5['slot'][:]
+        timestamp_data = self.hdf5['timestamp'][:]
         timestream = self.hdf5['timestream'][:]
+        if any(array.size == 0 for array in
+               (adc_input_data, crate_data, slot_data, timestamp_data, timestream)):
+            self.hdf5.close()
+            raise ValueError(f"Acquisition file {self.file!r} contains no frames.")
+        adc_input = np.hstack(adc_input_data)
+        crate = np.hstack(crate_data)
+        slot = np.hstack(slot_data)
+        timestamp = np.hstack(timestamp_data)
         adc_stream_len = timestream.shape[-1]
 
         fpga_counts = np.hstack(timestamp['fpga_count'])
@@ -150,7 +158,9 @@ class raw_acq(metaclass=_AcquisitionMeta):
         start_time = datetime.datetime.fromtimestamp(ctime[0], tz=datetime.timezone.utc).isoformat()
         end_time = datetime.datetime.fromtimestamp(ctime[-1], tz=datetime.timezone.utc).isoformat()
 
-        adc_record_fpga_count_index = np.where(np.roll(fpga_counts,1)!=fpga_counts)[0]
+        adc_record_fpga_count_index = np.flatnonzero(
+            np.r_[True, fpga_counts[1:] != fpga_counts[:-1]]
+        )
         adc_record_ctime_index = np.where(np.roll(ctime,1)!=ctime)[0]
         adc_record_fpga_count = fpga_counts[adc_record_fpga_count_index]
         adc_record_ctime = fpga_counts[adc_record_ctime_index]
@@ -161,7 +171,7 @@ class raw_acq(metaclass=_AcquisitionMeta):
         self.num_inputs = np.max(adc_input) + 1
         self.num_crates = np.max(crate) + 1
         self.num_slots = np.max(slot) + 1
-        self.num_timestamps = adc_record_fpga_count.shape[0] + 1
+        self.num_timestamps = adc_record_fpga_count.shape[0]
         self.timestream = timestream.astype(int)
         self.timestamp = timestamp
         self.crate = crate
@@ -378,8 +388,6 @@ class raw_acq(metaclass=_AcquisitionMeta):
             fig.show()
         
         def get_curve_fit(single_input):
-            xlist = [val for val in range(0+1, 2049)]
-            #xlist = [(float(val)*(1.25e-9)) for val in x]
             amp = []
             amp_error = []
             freq_stability = []
@@ -392,10 +400,11 @@ class raw_acq(metaclass=_AcquisitionMeta):
             
             #change the names so they make sense phase_err -> tau_err
             
-            for i in range(2048):
+            num_frames = single_input.time_streams.shape[0]
+            for i in range(num_frames):
                 #get each timestream for fitting
                 ylist = single_input.time_streams[i]
-                xlist = [val for val in range(0+1, len(xlist)+1)]
+                xlist = np.arange(1, len(ylist) + 1)
                 yerror = np.ones(len(xlist)) * 1/np.sqrt(12)
 
                 #fit the sine wave
@@ -411,7 +420,7 @@ class raw_acq(metaclass=_AcquisitionMeta):
                                       bounds=([-127, 0, 0, -128],[127, 2, 4*np.pi, 127]))
                     err = np.sqrt(np.diag(cov))
                 
-                #save values to list for each of the 2048 snapshots
+                # Save values for each available snapshot.
                 amp.append(np.abs(popt[0]))
                 amp_error.append(err[0])
                 
@@ -442,9 +451,10 @@ class raw_acq(metaclass=_AcquisitionMeta):
             single_input.vert_err = vertical_error
             single_input.phase_err = phase_err   #change!
             
-            single_input.phase_unwrapped = np.unwrap(phase - phase[0])
+            phase_array = np.asarray(phase)
+            single_input.phase_unwrapped = np.unwrap(phase_array - phase_array[0])
             single_input.tau_shift = [(val/2/np.pi/(popt[1]*10e6)/1e-9) for val in single_input.phase_unwrapped]
-            for val in range(2048):
+            for val in range(num_frames):
                 if single_input.phase_err[val] > 1e7:
                     print(val)
             #why 10e6 and 1.25e-9
@@ -475,20 +485,21 @@ class raw_acq(metaclass=_AcquisitionMeta):
             #get avg of d, then do curve fit again with a set d value
             #save error to plot the b val with error bars  
             
+            fit_indices = np.arange(len(single_input.tau_shift))
             fig, ax = plt.subplots(figsize=(20,10))
             #ax.plot(xlist, tau_shift, '.')
-            ax.errorbar(xlist, single_input.tau_shift, yerr=single_input.tau_err, fmt=',', ecolor='orange')
+            ax.errorbar(fit_indices, single_input.tau_shift, yerr=single_input.tau_err, fmt=',', ecolor='orange')
             ax.set_title('Tau shift')
-            ax.set_ylabel('$\Delta$ $\tau$ (ns)')
+            ax.set_ylabel(r'$\Delta$ $\tau$ (ns)')
             
             fig, ax1 = plt.subplots(figsize=(20,10))
             #ax1.errorbar(xlist, single_input.freq_stability, yerr=single_input.freq_err, fmt='.', ecolor='orange')
-            ax1.plot(xlist, single_input.freq_stability, '.')
+            ax1.plot(fit_indices, single_input.freq_stability, '.')
             ax1.set_title('Frequency Stability')
             
             fig, ax2 = plt.subplots(figsize=(20,10))
             #ax2.errorbar(xlist, single_input.amp, yerr=single_input.amp_err, fmt='.', ecolor='orange')
-            ax2.plot(xlist, single_input.amp, '.')
+            ax2.plot(fit_indices, single_input.amp, '.')
             ax2.set_title('Amplitude')
             
                 
@@ -567,28 +578,31 @@ class analyse_maser:
         
         
         '''
-        files = glob.glob(self.folder_path + "*[!.lock]")
-        files.sort()
-        files = files[:self.num_files]
+        files = _list_acquisition_files(self.folder_path)[:self.num_files]
+        if not files:
+            raise FileNotFoundError(f"No acquisition files found in {self.folder_path!r}.")
         print(*files, sep = "\n")
         taus = []
         delays = []
         angles = []
-        num_files = len(files) ### this is zero
-        #calling progressbar with it=0 so that when we initialize count = 0, we divide by 0 (in x)
+        num_files = len(files)
         input_to_check = self.maser_input            
         for i in progressbar(range(num_files), "Computing Delay: ", 80):
             file_name = files[i]
             try:
-                raw_acq(file_name)
-            except OSError: 
-                pass
-            maser = raw_acq.check_input(input_to_check)
+                acquisition = raw_acq(file_name)
+            except (OSError, KeyError, ValueError) as error:
+                warnings.warn(f"Skipping unreadable acquisition file {file_name!r}: {error}")
+                continue
+            maser = acquisition.check_input(input_to_check)
             maser.inspect_maser()
             taus.append(maser.time_fpga_count)
             delays.append(maser.tau)
             angles.append(maser.angles)
             
+        if not taus:
+            raise OSError(f"No readable acquisition files found in {self.folder_path!r}.")
+
         self.fpgatime = np.concatenate(taus, axis = 0)
         self.angles = np.concatenate(angles, axis = 0)
         self.delays = np.concatenate(delays, axis = 0)
@@ -649,13 +663,23 @@ class analyse_maser:
         self.plt = plt
     
         
+def _list_acquisition_files(folder_path):
+    """Find regular, unlocked files for a directory or existing wildcard path."""
+    folder_path = os.fspath(folder_path)
+    pattern = os.path.join(folder_path, "*") if os.path.isdir(folder_path) else folder_path
+    return sorted(path for path in glob.glob(pattern)
+                  if os.path.isfile(path) and not path.lower().endswith(".lock"))
+
+
 def get_newest_file(folder_path):
     '''
     
     
     
     '''
-    files = glob.glob(folder_path + "*[!.lock]")
+    files = _list_acquisition_files(folder_path)
+    if not files:
+        raise FileNotFoundError(f"No acquisition files found in {folder_path!r}.")
     newest_file = max(files, key=os.path.getctime)
     return newest_file
 
@@ -665,7 +689,9 @@ def get_second_newest_file(folder_path):
     
     
     '''
-    files = glob.glob(folder_path + "*[!.lock]")
+    files = _list_acquisition_files(folder_path)
+    if len(files) < 2:
+        raise FileNotFoundError(f"Fewer than two acquisition files found in {folder_path!r}.")
     newest_file = max(files, key=os.path.getctime)
     files.remove(newest_file)
     newest_file = max(files, key=os.path.getctime)
